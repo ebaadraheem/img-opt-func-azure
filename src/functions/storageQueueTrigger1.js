@@ -24,37 +24,39 @@ app.storageQueue('ImageQueueTrigger', {
       context.log(`🖼️ Blob: ${blobName}`);
 
       // Initialize BlobServiceClient
-      const blobServiceClient = BlobServiceClient.fromConnectionString(
-        process.env.QueueStorageAccount
-      );
+      const blobServiceClient = BlobServiceClient.fromConnectionString(process.env.QueueStorageAccount);
+      const containerClient = blobServiceClient.getContainerClient(containerName);
+      const blobClient = containerClient.getBlockBlobClient(blobName);
 
-      const sourceContainerClient = blobServiceClient.getContainerClient(containerName);
-      const sourceBlobClient = sourceContainerClient.getBlobClient(blobName);
+      // STEP 1: Check metadata to skip already optimized images
+      const properties = await blobClient.getProperties();
+      const metadata = properties.metadata || {};
 
-      // Download blob
-      const downloadResponse = await sourceBlobClient.download();
+      if (metadata.optimized === 'true') {
+        context.log(`🚫 Skipping already optimized blob: ${blobName}`);
+        return;
+      }
+
+      // STEP 2: Download blob
+      const downloadResponse = await blobClient.download();
       const sourceBuffer = await streamToBuffer(downloadResponse.readableStreamBody);
       context.log(`✅ Downloaded blob (${sourceBuffer.length} bytes)`);
 
-      // Optimize image with sharp
+      // STEP 3: Optimize image using Sharp
       const optimizedBuffer = await sharp(sourceBuffer)
         .resize({ width: 1280, withoutEnlargement: true })
         .jpeg({ quality: 75 })
         .toBuffer();
       context.log(`🧠 Optimized image size: ${optimizedBuffer.length} bytes`);
 
-      // Destination container
-      const optimizedContainerName = process.env.OPTIMIZED_CONTAINER_NAME || 'optimized-images';
-      const optimizedContainerClient = blobServiceClient.getContainerClient(optimizedContainerName);
-
-      await optimizedContainerClient.createIfNotExists();
-
-      const optimizedBlobClient = optimizedContainerClient.getBlockBlobClient(blobName);
-      await optimizedBlobClient.uploadData(optimizedBuffer, {
+      // STEP 4: Upload back to same blob (overwrite) with metadata flag
+      await blobClient.uploadData(optimizedBuffer, {
+        overwrite: true,
         blobHTTPHeaders: { blobContentType: 'image/jpeg' },
+        metadata: { optimized: 'true' }, 
       });
 
-      context.log(`✅ Uploaded optimized image to '${optimizedContainerName}/${blobName}' successfully.`);
+      context.log(`✅ Optimized and updated blob '${blobName}' successfully with metadata.`);
     } catch (error) {
       context.log('❌ Error processing queue message:', error);
       throw error;
@@ -62,7 +64,7 @@ app.storageQueue('ImageQueueTrigger', {
   },
 });
 
-// Helper function: stream → buffer
+// Helper: Convert stream to buffer
 async function streamToBuffer(readableStream) {
   return new Promise((resolve, reject) => {
     const chunks = [];
